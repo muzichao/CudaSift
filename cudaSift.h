@@ -5,7 +5,7 @@
 
 typedef struct {
   float xpos;
-  float ypos;   
+  float ypos;
   float scale;
   float sharpness;
   float edgeness;
@@ -21,6 +21,14 @@ typedef struct {
   float data[128];
 } SiftPoint;
 
+/**
+ * numPts 可用的Sift特征点个数
+ * maxPts 分配的Sift特征点个数
+ * MANAGEDMEM 统一内存寻址
+ * m_data 统一内存地址
+ * h_data 主机端数据
+ * d_data 设备端数据
+ */
 typedef struct {
   int numPts;         // Number of available Sift points
   int maxPts;         // Number of allocated Sift points
