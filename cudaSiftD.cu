@@ -33,17 +33,17 @@ __constant__ float d_Kernel2[12*16];
  */
 __global__ void ScaleDown(float *d_Result, float *d_Data, int width, int pitch, int height, int newpitch)
 {
-  __shared__ float inrow[SCALEDOWN_W + 4];
-  __shared__ float brow[5 * (SCALEDOWN_W / 2)];
+  __shared__ float inrow[SCALEDOWN_W + 4]; // 保存原始图像中的一行
+  __shared__ float brow[5 * (SCALEDOWN_W / 2)]; // 保存按行高斯滤波后的结果，共5行
   __shared__ int yRead[SCALEDOWN_H + 4]; // 每个线程块对应原始图像的行索引的位置
   __shared__ int yWrite[SCALEDOWN_H + 4]; // 每个线程块对应降采样后的图像的行索引的位置
   #define dx2 (SCALEDOWN_W / 2)
-  const int tx = threadIdx.x;
-  const int tx0 = tx + 0 * dx2;
-  const int tx1 = tx + 1 * dx2;
-  const int tx2 = tx + 2 * dx2;
-  const int tx3 = tx + 3 * dx2;
-  const int tx4 = tx + 4 * dx2;
+  const int tx = threadIdx.x; // 当前线程在线程块中的列索引
+  const int tx0 = tx + 0 * dx2; // 进行列滤波时的第一行索引
+  const int tx1 = tx + 1 * dx2; // 进行列滤波时的第二行索引
+  const int tx2 = tx + 2 * dx2; // 进行列滤波时的第三行索引
+  const int tx3 = tx + 3 * dx2; // 进行列滤波时的第四行索引
+  const int tx4 = tx + 4 * dx2; // 进行列滤波时的第五行索引
   const int xStart = blockIdx.x * SCALEDOWN_W; // 每个线程块对应原始图像的列索引的起始位置
   const int yStart = blockIdx.y * SCALEDOWN_H; // 每个线程块对应原始图像的行索引的起始位置
   const int xWrite = xStart / 2 + tx; // 保存数据的全局列索引
@@ -69,13 +69,15 @@ __global__ void ScaleDown(float *d_Result, float *d_Data, int width, int pitch, 
 
   // 每5行（高斯核的大小）一起处理，直到处理完所有行
   for (int dy = 0; dy < SCALEDOWN_H + 4; dy += 5) {
-    inrow[tx] = d_Data[yRead[dy+0] + xRead];
+    inrow[tx] = d_Data[yRead[dy+0] + xRead]; // 读原始图像的一行
     __syncthreads();
 
+    // 对一行进行降采样及高斯滤波
     if (tx < dx2)
       brow[tx0] = k[0]*(inrow[2*tx]+inrow[2*tx+4]) + k[1]*(inrow[2*tx+1]+inrow[2*tx+3]) + k[2]*inrow[2*tx+2];
     __syncthreads();
 
+    // 行滤波5行之后再进行列滤波
     if (tx < dx2 && dy >= 4 && !(dy&1))
       d_Result[yWrite[dy+0] + xWrite] = k[2]*brow[tx2] + k[0]*(brow[tx0]+brow[tx4]) + k[1]*(brow[tx1]+brow[tx3]);
 
