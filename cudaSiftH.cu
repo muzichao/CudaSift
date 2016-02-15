@@ -44,7 +44,7 @@ void InitCuda(int devNum)
  * 提取Sift特征
  * @param siftData    sift特征点数据
  * @param img         待检测图像
- * @param numOctaves  金字塔层数
+ * @param numOctaves  高斯金字塔层数
  * @param initBlur
  * @param thresh
  * @param lowestScale
@@ -60,12 +60,12 @@ void ExtractSift(SiftData &siftData, CudaImage &img, int numOctaves, double init
   safeCall(cudaMemcpyToSymbol(d_MaxNumPoints, &siftData.maxPts, sizeof(int)));
 
   // 金字塔参数初始化，层数，数据大小等
-  const int nd = NUM_SCALES + 3; // 高斯金字塔每组需要的图像层数，见cduaSiftD.h
+  const int nd = NUM_SCALES + 3; // 高斯金字塔每层需要的图像组数，见cduaSiftD.h
   int w = img.width;
   int h = img.height;
   int p = iAlignUp(w, 128); // 向上取整，用于内存对齐，加速访问
-  int size = 0;         // image sizes
-  int sizeTmp = nd*h*p; // 金字塔数据大小
+  int size = 0;         // 高斯金字塔临时缓冲区大小
+  int sizeTmp = nd*h*p; // 高斯金字塔数据大小
   for (int i=0;i<numOctaves;i++) {
     w /= 2;
     h /= 2;
@@ -74,13 +74,13 @@ void ExtractSift(SiftData &siftData, CudaImage &img, int numOctaves, double init
     sizeTmp += nd*h*p;
   }
 
-  float *memoryTmp = NULL;
+  float *memoryTmp = NULL; // 指向高斯金字塔
   size_t pitch;
   size += sizeTmp;
   safeCall(cudaMallocPitch((void **)&memoryTmp, &pitch, (size_t)4096, (size+4095)/4096*sizeof(float)));
-  float *memorySub = memoryTmp + sizeTmp;
+  float *memorySub = memoryTmp + sizeTmp; // 指向高斯金字塔临时缓冲区（相当于nd=1）
 
-  // 循环处理每一层，完成降采样
+  // 循环处理每一层
   ExtractSiftLoop(siftData, img, numOctaves, initBlur, thresh, lowestScale, subsampling, memoryTmp, memorySub);
 
   // 从全局内存中获取提前到的可用sift特征点数
@@ -112,8 +112,8 @@ extern double DynamicMain(CudaImage &img, SiftData &siftData, int numOctaves, do
  * @param thresh
  * @param lowestScale
  * @param subsampling
- * @param memoryTmp
- * @param memorySub
+ * @param memoryTmp   指向高斯金字塔
+ * @param memorySub   指向高斯金字塔临时缓冲区（相当于nd=1）
  */
 void ExtractSiftLoop(SiftData &siftData, CudaImage &img, int numOctaves, double initBlur, float thresh, float lowestScale, float subsampling, float *memoryTmp, float *memorySub)
 {
@@ -121,15 +121,17 @@ void ExtractSiftLoop(SiftData &siftData, CudaImage &img, int numOctaves, double 
 #if 1
   int w = img.width;
   int h = img.height;
-  if (numOctaves>1) {
+  if (numOctaves > 1) {
     CudaImage subImg;
     int p = iAlignUp(w/2, 128);
     subImg.Allocate(w/2, h/2, p, false, memorySub);
-    ScaleDown(subImg, img, 0.5f);
+    ScaleDown(subImg, img, 0.5f); // 高斯滤波及降采样
+
     float totInitBlur = (float)sqrt(initBlur*initBlur + 0.5f*0.5f) / 2.0f;
     ExtractSiftLoop(siftData, subImg, numOctaves-1, totInitBlur, thresh, lowestScale, subsampling*2.0f, memoryTmp, memorySub + (h/2)*p);
   }
-  if (lowestScale<subsampling*2.0f)
+
+  if (lowestScale < subsampling * 2.0f)
     ExtractSiftOctave(siftData, img, initBlur, thresh, lowestScale, subsampling, memoryTmp);
 #else
   DynamicMain(img, siftData, numOctaves, initBlur, thresh, lowestScale, 10.0f, memoryTmp);
@@ -140,47 +142,68 @@ void ExtractSiftLoop(SiftData &siftData, CudaImage &img, int numOctaves, double 
 #endif
 }
 
+/**
+ *
+ * @param siftData    sift特征点数据
+ * @param img         给定的原始图像（或降采样后的图像）
+ * @param initBlur
+ * @param thresh
+ * @param lowestScale
+ * @param subsampling
+ * @param memoryTmp   指向高斯金字塔
+ */
 void ExtractSiftOctave(SiftData &siftData, CudaImage &img, double initBlur, float thresh, float lowestScale, float subsampling, float *memoryTmp)
 {
-  const int nd = NUM_SCALES + 3;
   TimerGPU timer0;
-  CudaImage diffImg[nd];
+
+  // 每一层有nd(S+3)组图像
+  const int nd = NUM_SCALES + 3;
+  CudaImage diffImg[nd]; // DOG金字塔
   int w = img.width;
   int h = img.height;
   int p = iAlignUp(w, 128);
-  for (int i=0;i<nd-1;i++)
+  for (int i = 0; i < nd - 1; i++)
     diffImg[i].Allocate(w, h, p, false, memoryTmp + i*p*h);
 
   // Specify texture
+  // 定义资源描述符，用来获取述纹理数据；
   struct cudaResourceDesc resDesc;
   memset(&resDesc, 0, sizeof(resDesc));
   resDesc.resType = cudaResourceTypePitch2D;
-  resDesc.res.pitch2D.devPtr = img.d_data;
-  resDesc.res.pitch2D.width = img.width;
-  resDesc.res.pitch2D.height = img.height;
-  resDesc.res.pitch2D.pitchInBytes = img.pitch*sizeof(float);
-  resDesc.res.pitch2D.desc = cudaCreateChannelDesc<float>();
+  resDesc.res.pitch2D.devPtr = img.d_data; // 设备端数据地址
+  resDesc.res.pitch2D.width = img.width; // 设备端数据宽度
+  resDesc.res.pitch2D.height = img.height; // 设备端数据高度
+  resDesc.res.pitch2D.pitchInBytes = img.pitch*sizeof(float); // 内存对齐大小
+  resDesc.res.pitch2D.desc = cudaCreateChannelDesc<float>(); // 格式描述
+
   // Specify texture object parameters
+  // 定义纹理描述符，用来描述纹理参数；
   struct cudaTextureDesc texDesc;
   memset(&texDesc, 0, sizeof(texDesc));
-  texDesc.addressMode[0]   = cudaAddressModeClamp;
-  texDesc.addressMode[1]   = cudaAddressModeClamp;
-  texDesc.filterMode       = cudaFilterModeLinear;
-  texDesc.readMode         = cudaReadModeElementType;
-  texDesc.normalizedCoords = 0;
+  texDesc.addressMode[0]   = cudaAddressModeClamp; // 纹理数据第0维度的读取方式
+  texDesc.addressMode[1]   = cudaAddressModeClamp; // 纹理数据第1维度的读取方式
+  texDesc.filterMode       = cudaFilterModeLinear; // 滤波方法（此处线性滤波）
+  texDesc.readMode         = cudaReadModeElementType; // 整型数据是否转换为浮点型（此处为0）
+  texDesc.normalizedCoords = 0; // 纹理读取时是否归一化
+
   // Create texture object
+  // 生成纹理对象；
   cudaTextureObject_t texObj = 0;
   cudaCreateTextureObject(&texObj, &resDesc, &texDesc, NULL);
 
   TimerGPU timer1;
-  float baseBlur = pow(2.0f, -1.0f/NUM_SCALES);
-  float diffScale = pow(2.0f, 1.0f/NUM_SCALES);
-  LaplaceMulti(texObj, diffImg, baseBlur, diffScale, initBlur);
+  float baseBlur = pow(2.0f, -1.0f/NUM_SCALES); // 尺度空间因子初始参数
+  float diffScale = pow(2.0f, 1.0f/NUM_SCALES); // 尺度空间因子缩放参数
+  LaplaceMulti(texObj, diffImg, baseBlur, diffScale, initBlur); // 计算高斯金字塔和DOG金字塔
+
   int fstPts = 0;
   safeCall(cudaMemcpyFromSymbol(&fstPts, d_PointCounter, sizeof(int)));
   double sigma = baseBlur*diffScale;
   FindPointsMulti(diffImg, siftData, thresh, 10.0f, sigma, 1.0f/NUM_SCALES, lowestScale/subsampling, subsampling);
+
   double gpuTimeDoG = timer1.read();
+
+
   TimerGPU timer4;
   int totPts = 0;
   safeCall(cudaMemcpyFromSymbol(&totPts, d_PointCounter, sizeof(int)));
@@ -362,45 +385,69 @@ double ExtractSiftDescriptors(cudaTextureObject_t texObj, SiftData &siftData, in
 
 //==================== Multi-scale functions ===================//
 
+/**
+ * 计算一层高斯金字塔和DOG金字塔
+ * @param  texObj    图像纹理
+ * @param  results   DOG金字塔的一层（CudaImage数组）
+ * @param  baseBlur  尺度空间因子初始参数
+ * @param  diffScale 尺度空间因子缩放参数
+ * @param  initBlur
+ * @return
+ */
 double LaplaceMulti(cudaTextureObject_t texObj, CudaImage *results, float baseBlur, float diffScale, float initBlur)
 {
+  // 计算多尺度的1d高斯核集合
   float kernel[12*16];
   float scale = baseBlur;
-  for (int i=0;i<NUM_SCALES+3;i++) {
+  for (int i = 0; i < NUM_SCALES + 3; i++) {
     float kernelSum = 0.0f;
-    float var = scale*scale - initBlur*initBlur;
-    for (int j=-LAPLACE_R;j<=LAPLACE_R;j++) {
-      kernel[16*i+j+LAPLACE_R] = (float)expf(-(double)j*j/2.0/var);
-      kernelSum += kernel[16*i+j+LAPLACE_R];
+    float var = scale*scale - initBlur * initBlur; // 尺度空间因子
+    // 计算1个kernel
+    for (int j = -LAPLACE_R; j <= LAPLACE_R; j++) {
+      kernel[16 * i + j + LAPLACE_R] = (float)expf(-(double)j * j / 2.0 / var);
+      kernelSum += kernel[16 * i + j + LAPLACE_R];
     }
-    for (int j=-LAPLACE_R;j<=LAPLACE_R;j++)
-      kernel[16*i+j+LAPLACE_R] /= kernelSum;
-    scale *= diffScale;
+
+    // kernel归一化
+    for (int j = -LAPLACE_R; j <= LAPLACE_R; j++)
+      kernel[16 * i + j + LAPLACE_R] /= kernelSum;
+
+    scale *= diffScale; // 尺度空间因子缩放
   }
+
+  // 将主机端的多尺度高斯核拷贝到设备端
   safeCall(cudaMemcpyToSymbol(d_Kernel2, kernel, 12*16*sizeof(float)));
+
   int width = results[0].width;
   int pitch = results[0].pitch;
   int height = results[0].height;
-  dim3 blocks(iDivUp(width+2*LAPLACE_R, LAPLACE_W), height);
-  dim3 threads(LAPLACE_W+2*LAPLACE_R, LAPLACE_S);
+
+  // 线程块和线程格
+  // 每块包含当前层每组的一行，若干列（64）
+  dim3 blocks(iDivUp(width + 2 * LAPLACE_R, LAPLACE_W), height);
+  dim3 threads(LAPLACE_W + 2 * LAPLACE_R, LAPLACE_S);
+
+  // 多尺度拉普拉斯变换
   LaplaceMulti<<<blocks, threads>>>(texObj, results[0].d_data, width, pitch, height);
   checkMsg("LaplaceMulti() execution failed\n");
+
   return 0.0;
 }
 
 double FindPointsMulti(CudaImage *sources, SiftData &siftData, float thresh, float edgeLimit, float scale, float factor, float lowestScale, float subsampling)
 {
-  if (sources->d_data==NULL) {
+  if (sources->d_data == NULL) {
     printf("FindPointsMulti: missing data\n");
     return 0.0;
   }
+
   int w = sources->width;
   int p = sources->pitch;
   int h = sources->height;
   float threshs[2] = { thresh, -thresh };
   float scales[NUM_SCALES];
   float diffScale = pow(2.0f, factor);
-  for (int i=0;i<NUM_SCALES;i++) {
+  for (int i = 0; i < NUM_SCALES; i++) {
     scales[i] = scale;
     scale *= diffScale;
   }
@@ -411,6 +458,7 @@ double FindPointsMulti(CudaImage *sources, SiftData &siftData, float thresh, flo
 
   dim3 blocks(iDivUp(w, MINMAX_W)*NUM_SCALES, iDivUp(h, MINMAX_H));
   dim3 threads(MINMAX_W + 2);
+
 #ifdef MANAGEDMEM
   FindPointsMulti<<<blocks, threads>>>(sources->d_data, siftData.m_data, w, p, h, NUM_SCALES, subsampling);
 #else

@@ -54,7 +54,7 @@ int main(int argc, char **argv)
   // Extract Sift features from images
   // 提取sift特征
   SiftData siftData1, siftData2; // Sift特征点
-  float initBlur = 0.0f;
+  float initBlur = 0.0f; // 多尺度高斯核参数
   float thresh = 5.0f;
   InitSiftData(siftData1, 4096, true, true); // SiftData数据初始化，见cudaSiftH.cu
   InitSiftData(siftData2, 4096, true, true); // SiftData数据初始化，见cudaSiftH.cu
