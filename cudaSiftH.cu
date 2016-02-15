@@ -451,13 +451,14 @@ double FindPointsMulti(CudaImage *sources, SiftData &siftData, float thresh, flo
     scales[i] = scale;
     scale *= diffScale;
   }
-  safeCall(cudaMemcpyToSymbol(d_Threshold, &threshs, 2*sizeof(float)));
+  safeCall(cudaMemcpyToSymbol(d_Threshold, &threshs, 2 * sizeof(float)));
   safeCall(cudaMemcpyToSymbol(d_EdgeLimit, &edgeLimit, sizeof(float)));
   safeCall(cudaMemcpyToSymbol(d_Scales, scales, sizeof(float)*NUM_SCALES));
   safeCall(cudaMemcpyToSymbol(d_Factor, &factor, sizeof(float)));
 
+  // 线程块和线程格
   dim3 blocks(iDivUp(w, MINMAX_W)*NUM_SCALES, iDivUp(h, MINMAX_H));
-  dim3 threads(MINMAX_W + 2);
+  dim3 threads(MINMAX_W + 2); // (128, 1)
 
 #ifdef MANAGEDMEM
   FindPointsMulti<<<blocks, threads>>>(sources->d_data, siftData.m_data, w, p, h, NUM_SCALES, subsampling);

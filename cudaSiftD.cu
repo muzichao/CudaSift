@@ -358,32 +358,33 @@ __global__ void ComputeOrientations(cudaTextureObject_t texObj, SiftPoint *d_Sif
 
  __global__ void FindPointsMulti(float *d_Data0, SiftPoint *d_Sift, int width, int pitch, int height, int nScales, float subsampling)
 {
-  #define MEMWID (MINMAX_W + 2)
+  #define MEMWID (MINMAX_W + 2)  // (128)
   __shared__ float ymin1[MEMWID], ymin2[MEMWID], ymin3[MEMWID];
   __shared__ float ymax1[MEMWID], ymax2[MEMWID], ymax3[MEMWID];
   __shared__ unsigned int cnt;
   __shared__ unsigned short points[96];
 
-  int tx = threadIdx.x;
-  int block = blockIdx.x/nScales;
-  int scale = blockIdx.x - nScales*block;
-  int minx = block*MINMAX_W;
+  int tx = threadIdx.x; // 当前线程的列索引
+  int block = blockIdx.x / nScales; // 当前线程对应的 nScales，中间组数
+  int scale = blockIdx.x - nScales * block; // 当前线程对应某个中间组的列数
+  int minx = block * MINMAX_W;
   int maxx = min(minx + MINMAX_W, width);
   int xpos = minx + tx;
-  int size = pitch*height;
-  int ptr = size*scale + max(min(xpos-1, width-1), 0);
+  int size = pitch * height;
+  int ptr = size * scale + max(min(xpos-1, width-1), 0);
 
-  if (tx==0)
+  if (tx == 0)
     cnt = 0;
   __syncthreads();
 
-  int yloops = min(height - MINMAX_H*blockIdx.y, MINMAX_H);
-  for (int y=0;y<yloops;y++) {
+  int yloops = min(height - MINMAX_H * blockIdx.y, MINMAX_H);
+  for (int y=0; y < yloops; y++) {
 
-    int ypos = MINMAX_H*blockIdx.y + y;
-    int yptr0 = ptr + max(0,ypos-1)*pitch;
-    int yptr1 = ptr + ypos*pitch;
-    int yptr2 = ptr + min(height-1,ypos+1)*pitch;
+    int ypos = MINMAX_H * blockIdx.y + y;
+    int yptr0 = ptr + max(0, ypos-1) * pitch;
+    int yptr1 = ptr + ypos * pitch;
+    int yptr2 = ptr + min(height-1, ypos+1) * pitch;
+
     {
       float d10 = d_Data0[yptr0];
       float d11 = d_Data0[yptr1];
@@ -391,6 +392,7 @@ __global__ void ComputeOrientations(cudaTextureObject_t texObj, SiftPoint *d_Sif
       ymin1[tx] = fminf(fminf(d10, d11), d12);
       ymax1[tx] = fmaxf(fmaxf(d10, d11), d12);
     }
+
     {
       float d30 = d_Data0[yptr0 + 2*size];
       float d31 = d_Data0[yptr1 + 2*size];
@@ -398,37 +400,44 @@ __global__ void ComputeOrientations(cudaTextureObject_t texObj, SiftPoint *d_Sif
       ymin3[tx] = fminf(fminf(d30, d31), d32);
       ymax3[tx] = fmaxf(fmaxf(d30, d31), d32);
     }
+
     float d20 = d_Data0[yptr0 + 1*size];
     float d21 = d_Data0[yptr1 + 1*size];
     float d22 = d_Data0[yptr2 + 1*size];
     ymin2[tx] = fminf(fminf(ymin1[tx], fminf(fminf(d20, d21), d22)), ymin3[tx]);
     ymax2[tx] = fmaxf(fmaxf(ymax1[tx], fmaxf(fmaxf(d20, d21), d22)), ymax3[tx]);
+
     __syncthreads();
-    if (tx>0 && tx<MINMAX_W+1 && xpos<=maxx) {
-      if (d21<d_Threshold[1]) {
-	float minv = fminf(fminf(fminf(ymin2[tx-1], ymin2[tx+1]), ymin1[tx]), ymin3[tx]);
-	minv = fminf(fminf(minv, d20), d22);
-	if (d21<minv) {
-	  int pos = atomicInc(&cnt, 31);
-	  points[3*pos+0] = xpos - 1;
-	  points[3*pos+1] = ypos;
-	  points[3*pos+2] = scale;
-	}
+
+    if (tx > 0 && tx < MINMAX_W + 1 && xpos <= maxx) {
+      if (d21 < d_Threshold[1]) {
+        float minv = fminf(fminf(fminf(ymin2[tx-1], ymin2[tx+1]), ymin1[tx]), ymin3[tx]);
+        minv = fminf(fminf(minv, d20), d22);
+        if (d21<minv) {
+          int pos = atomicInc(&cnt, 31);
+          points[3*pos+0] = xpos - 1;
+          points[3*pos+1] = ypos;
+          points[3*pos+2] = scale;
+        }
       }
-      if (d21>d_Threshold[0]) {
-	float maxv = fmaxf(fmaxf(fmaxf(ymax2[tx-1], ymax2[tx+1]), ymax1[tx]), ymax3[tx]);
-	maxv = fmaxf(fmaxf(maxv, d20), d22);
-	if (d21>maxv) {
-	  int pos = atomicInc(&cnt, 31);
-	  points[3*pos+0] = xpos - 1;
-	  points[3*pos+1] = ypos;
-	  points[3*pos+2] = scale;
-	}
+
+      if (d21 > d_Threshold[0]) {
+        float maxv = fmaxf(fmaxf(fmaxf(ymax2[tx-1], ymax2[tx+1]), ymax1[tx]), ymax3[tx]);
+        maxv = fmaxf(fmaxf(maxv, d20), d22);
+        if (d21>maxv) {
+          int pos = atomicInc(&cnt, 31);
+          points[3*pos+0] = xpos - 1;
+          points[3*pos+1] = ypos;
+          points[3*pos+2] = scale;
+        }
       }
+
     }
+
     __syncthreads();
   }
-  if (tx<cnt) {
+
+  if (tx < cnt) {
     int xpos = points[3*tx+0];
     int ypos = points[3*tx+1];
     int scale = points[3*tx+2];
@@ -440,6 +449,7 @@ __global__ void ComputeOrientations(cudaTextureObject_t texObj, SiftPoint *d_Sif
     float dxy = 0.25f*(data1[+pitch+1] + data1[-pitch-1] - data1[-pitch+1] - data1[+pitch-1]);
     float tra = dxx + dyy;
     float det = dxx*dyy - dxy*dxy;
+
     if (tra*tra<d_EdgeLimit*det) {
       float edge = __fdividef(tra*tra, det);
       float dx = 0.5f*(data1[1] - data1[-1]);
@@ -460,11 +470,13 @@ __global__ void ComputeOrientations(cudaTextureObject_t texObj, SiftPoint *d_Sif
       float pdx = idet*(idxx*dx + idxy*dy + idxs*ds);
       float pdy = idet*(idxy*dx + idyy*dy + idys*ds);
       float pds = idet*(idxs*dx + idys*dy + idss*ds);
+
       if (pdx<-0.5f || pdx>0.5f || pdy<-0.5f || pdy>0.5f || pds<-0.5f || pds>0.5f) {
-	pdx = __fdividef(dx, dxx);
-	pdy = __fdividef(dy, dyy);
-	pds = __fdividef(ds, dss);
+        pdx = __fdividef(dx, dxx);
+      	pdy = __fdividef(dy, dyy);
+      	pds = __fdividef(ds, dss);
       }
+
       float dval = 0.5f*(dx*pdx + dy*pdy + ds*pds);
       int maxPts = d_MaxNumPoints;
       unsigned int idx = atomicInc(d_PointCounter, 0x7fffffff);
